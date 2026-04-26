@@ -1,0 +1,43 @@
+{
+  "name": "pi-modes",
+  "version": "0.1.0",
+  "description": "Switchable agent modes for pi-coding-agent (ask, edit, plan, reviewer)",
+  "author": "R-Dson",
+  "license": "MIT",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/R-Dson/pi-modes.git"
+  },
+  "bugs": {
+    "url": "https://github.com/R-Dson/pi-modes/issues"
+  },
+  "homepage": "https://github.com/R-Dson/pi-modes",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "pi-modes",
+    "agent-modes"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "index.ts",
+    "modes/",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
