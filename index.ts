@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Key } from "@mariozechner/pi-tui";
+import { CustomEditor, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 interface ModeDef {
   id: string;
   name: string;
+  color: string;
   disabledTools: Set<string>;
   prompt: string;
 }
@@ -59,6 +60,7 @@ export default function modesExtension(pi: ExtensionAPI): void {
       const prompt = lines.slice(sep + 1).join("\n").trim();
 
       let name = file.replace(".md", "");
+      let color = "accent";
       const disabledTools: string[] = [];
       let inTools = false;
       let hadToolsBlock = false;
@@ -98,6 +100,12 @@ export default function modesExtension(pi: ExtensionAPI): void {
           continue;
         }
 
+        if (/^color:(?: |$)/.test(trimmed)) {
+          const parsed = trimmed.slice(trimmed.indexOf(":") + 1).trim();
+          if (parsed) color = parsed;
+          continue;
+        }
+
         if (trimmed === "tools:") {
           inTools = true;
           hadToolsBlock = true;
@@ -121,6 +129,7 @@ export default function modesExtension(pi: ExtensionAPI): void {
       availableModes.push({
         id,
         name,
+        color,
         disabledTools: new Set(disabledTools),
         prompt,
       });
@@ -133,6 +142,11 @@ export default function modesExtension(pi: ExtensionAPI): void {
   }
 
   // ── 2. Mode switcher ───────────────────────────────────────────────────────
+
+  function updateModeStatus(ctx: ExtensionContext): void {
+    // Mode label is rendered by the custom editor component.
+    // No separate status update needed — just skip if ctx has no UI.
+  }
 
   function setMode(ctx: ExtensionContext, index: number): boolean {
     if (index < 0 || index >= availableModes.length) return false;
@@ -156,7 +170,7 @@ export default function modesExtension(pi: ExtensionAPI): void {
 
     // Update index only after setActiveTools succeeds.
     currentModeIndex = index;
-    ctx.ui.setStatus("mode-indicator", `[Mode: ${mode.name}]`);
+    updateModeStatus(ctx);
     return true;
   }
 
@@ -289,7 +303,29 @@ export default function modesExtension(pi: ExtensionAPI): void {
     type: "string",
   });
 
-  // ── 7. Bootstrap ───────────────────────────────────────────────────────────
+  // ── 7. Inject mode info into the chat box border ──────────────────────────
+
+  pi.on("session_start", (_event, ctx) => {
+    const uiTheme = ctx.ui.theme;
+    ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+      class ModeEditor extends CustomEditor {
+        override render(width: number): string[] {
+          const lines = super.render(width);
+          const mode = availableModes[currentModeIndex];
+          if (mode && lines.length > 0) {
+            const label = ` ${mode.name} `;
+            const labelWidth = visibleWidth(label);
+            const dashes = "─".repeat(Math.max(0, width - labelWidth));
+            lines[lines.length - 1] = uiTheme.fg(mode.color, label) + dashes;
+          }
+          return lines;
+        }
+      }
+      return new ModeEditor(tui, theme, keybindings);
+    });
+  });
+
+  // ── 8. Bootstrap ───────────────────────────────────────────────────────────
   // session_start is the only safe place to capture baseline tools — all extensions
   // have registered by this point, so the tool list is complete.
 
