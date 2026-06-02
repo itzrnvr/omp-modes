@@ -216,14 +216,6 @@ export default function modesExtension(pi: ExtensionAPI): void {
     previousModeId = availableModes[currentModeIndex]?.id || "";
     currentModeIndex = index;
     cachedPrompt = loadPrompt(mode);
-    // Refresh statusline: setStatus triggers requestRender; the monkey-patched
-    // SEGMENTS.mode.render reads currentModeIndex directly, so the top border
-    // updates on the next updateEditorTopBorder() call (agent event / resize).
-    try {
-      ctx.ui.setStatus("mode", mode.name.toUpperCase());
-    } catch {
-      // setStatus may not be available in all contexts (e.g., RPC/print modes)
-    }
     return true;
   }
 
