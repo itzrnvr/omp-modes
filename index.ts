@@ -216,6 +216,8 @@ export default function modesExtension(pi: ExtensionAPI): void {
     previousModeId = availableModes[currentModeIndex]?.id || "";
     currentModeIndex = index;
     cachedPrompt = loadPrompt(mode);
+    // Clear any leftover footer status from previous modes.
+    try { ctx.ui.setStatus("mode", undefined); } catch {}
     return true;
   }
 
@@ -233,7 +235,10 @@ export default function modesExtension(pi: ExtensionAPI): void {
     // Default mode is the original baseline — no marker injection, no status
     // chatter.  The model sees the unmodified system prompt.
     if (newModeId === "default") return;
-    const oldName = oldModeId ? oldModeId.toUpperCase() : "DEFAULT";
+    // Also suppress when coming from default (oldModeId "" means default was
+    // active but never injected a marker — no point saying "DEFAULT → EDIT").
+    if (!oldModeId) return;
+    const oldName = oldModeId.toUpperCase();
     const newName = newModeId.toUpperCase();
     const tools = availableModes[currentModeIndex];
     const disabled = tools.disabledTools.size > 0
@@ -242,9 +247,7 @@ export default function modesExtension(pi: ExtensionAPI): void {
     const marker = [
       `[MODE SWITCH: ${oldName} → ${newName}]`,
       `You are now in ${newName} mode.${disabled}`,
-      oldModeId
-        ? `Previous responses were under ${oldName} mode rules. From this point forward, follow ${newName} mode rules.`
-        : `Session started in ${newName} mode.`,
+      `Previous responses were under ${oldName} mode rules. From this point forward, follow ${newName} mode rules.`,
     ].join(" ");
     try {
       pi.sendMessage({ customType: "mode-switch", content: marker, display: true });
@@ -431,62 +434,26 @@ export default function modesExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    // Restore persisted mode, or apply --mode flag, or fall back to edit/first.
-    const entries = ctx.sessionManager.getEntries();
-    let restoredId: string | undefined;
-
-    // Reverse-iterate to find the most recent persisted state quickly.
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i];
-      if (entry.type === "custom" && entry.customType === PERSIST_KEY) {
-        const data = entry.data as { modeId?: string } | undefined;
-        if (typeof data?.modeId === "string") {
-          restoredId = data.modeId;
-          break;
-        }
-      }
-    }
-
+    // Always start in "default" mode unless --mode flag overrides it.
+    // The default mode leaves OMP's system prompt untouched.
     const modeFlag = pi.getFlag("mode");
     let targetIndex: number;
-    // Helper: prefer "default" mode, fall back to "edit", then first mode.
-    const fallbackIndex = (): number => {
-      const def = availableModes.findIndex(m => m.id === "default");
-      if (def !== -1) return def;
-      const edit = availableModes.findIndex(m => m.id === "edit");
-      return edit !== -1 ? edit : 0;
-    };
     if (typeof modeFlag === "string" && modeFlag) {
-      // CLI flag takes priority
       const flagIndex = availableModes.findIndex(m => m.id === modeFlag.toLowerCase());
       if (flagIndex !== -1) {
         targetIndex = flagIndex;
       } else {
         console.warn(`[modes] Unknown --mode "${modeFlag}". Available: ${availableModes.map(m => m.id).join(", ")}`);
-        const restoredIndex = restoredId ? availableModes.findIndex(m => m.id === restoredId) : -1;
-        targetIndex = restoredIndex !== -1 ? restoredIndex : fallbackIndex();
-      }
-    } else if (restoredId) {
-      const restoredIndex = availableModes.findIndex(m => m.id === restoredId);
-      if (restoredIndex !== -1) {
-        targetIndex = restoredIndex;
-      } else {
-        // Mode was removed since last session — fall back to default
-        console.warn(`[modes] Previously active mode "${restoredId}" no longer exists.`);
-        targetIndex = fallbackIndex();
+        targetIndex = availableModes.findIndex(m => m.id === "default");
       }
     } else {
-      targetIndex = fallbackIndex();
+      targetIndex = availableModes.findIndex(m => m.id === "default");
     }
+    if (targetIndex === -1) targetIndex = 0;
     if (setMode(ctx, targetIndex)) {
       const targetMode = availableModes[targetIndex];
-      // Show a status message for non-default modes (default is the baseline).
       if (!targetMode.isDefault) {
         ctx.ui.notify(`Mode: ${targetMode.name}`, "info");
-      }
-      // Inject mode marker on session start so the model knows what mode it's in
-      // (but not for the default mode — that's the original baseline).
-      if (!targetMode.isDefault) {
         notifyModeSwitch("", targetMode.id);
       }
     }
