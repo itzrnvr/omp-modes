@@ -433,8 +433,10 @@ export default function modesExtension(pi: ExtensionAPI): void {
       ctx.ui.notify("[modes] No active tools found. Mode restore skipped.", "warning");
       return;
     }
-
+    // Clear any stale hook status from a previous session (e.g. "Mode: Edit").
+    try { ctx.ui.setStatus("mode", undefined); } catch {}
     // Always start in "default" mode unless --mode flag overrides it.
+
     // The default mode leaves OMP's system prompt untouched.
     const modeFlag = pi.getFlag("mode");
     let targetIndex: number;
