@@ -170,6 +170,7 @@ export default function modesExtension(pi: ExtensionAPI): void {
   // content.  `updateEditorTopBorder()` calls `setTopBorder()` on every
   // agent event, resize, and mode-status change — so the indicator
   // refreshes automatically.
+  let activeModeEditor: CustomEditor | null = null;
   class ModeEditor extends CustomEditor {
     setTopBorder(content: EditorTopBorder | undefined): void {
       if (content) {
@@ -198,6 +199,16 @@ export default function modesExtension(pi: ExtensionAPI): void {
     }
   }
 
+  // Re-trigger updateEditorTopBorder() by calling setEditorComponent with the
+  // same ModeEditor instance.  This is the only extension API that forces a
+  // top-border refresh without creating a new editor.
+  function refreshModeBorder(ctx: ExtensionContext): void {
+    if (!activeModeEditor) return;
+    try {
+      ctx.ui.setEditorComponent(() => activeModeEditor as any);
+    } catch { /* ignore */ }
+  }
+
   function setMode(ctx: ExtensionContext, index: number): boolean {
     if (index < 0 || index >= availableModes.length) return false;
     if (baselineTools.length === 0) return false;
@@ -218,17 +229,8 @@ export default function modesExtension(pi: ExtensionAPI): void {
     previousModeId = availableModes[currentModeIndex]?.id || "";
     currentModeIndex = index;
     cachedPrompt = loadPrompt(mode);
-    // Re-install the editor so updateEditorTopBorder() picks up the new mode.
-    // Without this, the top border only refreshes on agent events — the mode
-    // indicator would lag or disappear between mode switches and the next event.
-    try {
-      ctx.ui.setEditorComponent((_tui, editorTheme, _keybindings) => {
-        const editor = new ModeEditor(editorTheme);
-        return editor as any;
-      });
-    } catch (err) {
-      console.warn(`[modes] setEditorComponent failed: ${err}`);
-    }
+    // Force a top-border refresh so the mode indicator updates immediately.
+    refreshModeBorder(ctx);
     return true;
   }
 
@@ -469,10 +471,11 @@ export default function modesExtension(pi: ExtensionAPI): void {
       }
     }
     // Install the custom editor that shows the mode name in the top border.
+    // Store the instance so we can re-trigger updateEditorTopBorder() later.
     try {
       ctx.ui.setEditorComponent((_tui, editorTheme, _keybindings) => {
-        const editor = new ModeEditor(editorTheme);
-        return editor as any;
+        activeModeEditor = new ModeEditor(editorTheme);
+        return activeModeEditor as any;
       });
     } catch (err) {
       console.warn(`[modes] setEditorComponent failed: ${err}`);
