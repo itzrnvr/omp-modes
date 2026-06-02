@@ -1,4 +1,6 @@
 import { ExtensionAPI, type ExtensionContext, theme } from "@oh-my-pi/pi-coding-agent";
+import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import type { EditorTopBorder } from "@oh-my-pi/pi-tui";
 import { Key } from "@oh-my-pi/pi-tui";
 import * as fs from "fs";
 import * as path from "path";
@@ -161,21 +163,25 @@ export default function modesExtension(pi: ExtensionAPI): void {
   if (availableModes.length === 1) {
     console.warn(`[modes] No valid .md files found in ${modesDir}. Only the synthetic "default" mode is available.`);
   }
-  // ── 1b. Mode indicator widget ──────────────────────────────────────────────
+  // ── 1b. Custom editor with mode indicator in top border ───────────────────
   //
-  // Use the public `setWidget` API with `aboveEditor` placement to show the
-  // current mode name as a widget just above the editor.  This is the
-  // official extension surface — no monkey-patching of OMP internals.
-  function refreshModeIndicator(ctx: ExtensionContext): void {
-    const mode = availableModes[currentModeIndex];
-    if (!mode) {
-      try { ctx.ui.setWidget("mode-indicator", undefined); } catch {}
-      return;
+  // Subclass `CustomEditor` (the standard OMP editor) and override
+  // `setTopBorder()` to prepend the active mode name to the statusline
+  // content.  `updateEditorTopBorder()` calls `setTopBorder()` on every
+  // agent event, resize, and mode-status change — so the indicator
+  // refreshes automatically.
+  class ModeEditor extends CustomEditor {
+    setTopBorder(content: EditorTopBorder | undefined): void {
+      if (content) {
+        const mode = availableModes[currentModeIndex];
+        if (mode) {
+          const label = ` ${mode.name.toUpperCase()} `;
+          const colored = theme.fg(mode.color as any, label);
+          content = { content: content.content + colored, width: content.width + label.length };
+        }
+      }
+      super.setTopBorder(content);
     }
-    const label = theme.fg(mode.color as any, mode.name.toUpperCase());
-    try {
-      ctx.ui.setWidget("mode-indicator", [label], { placement: "aboveEditor" });
-    } catch {}
   }
 
   // ── 2. Mode switcher ───────────────────────────────────────────────────────
@@ -212,8 +218,6 @@ export default function modesExtension(pi: ExtensionAPI): void {
     previousModeId = availableModes[currentModeIndex]?.id || "";
     currentModeIndex = index;
     cachedPrompt = loadPrompt(mode);
-    // Update the above-editor mode indicator widget.
-    refreshModeIndicator(ctx);
     return true;
   }
 
@@ -429,9 +433,19 @@ export default function modesExtension(pi: ExtensionAPI): void {
       ctx.ui.notify("[modes] No active tools found. Mode restore skipped.", "warning");
       return;
     }
+    // Install the custom editor that shows the mode name in the top border.
+    // This replaces the default editor; all state (text, cursor) is preserved.
+    try {
+      ctx.ui.setEditorComponent((_tui, editorTheme, keybindings) => {
+        const editor = new ModeEditor(editorTheme);
+        // Wire up keybindings so shortcuts (Ctrl+C, Ctrl+P, etc.) still work.
+        // The interactive-mode sets these callbacks after setEditorComponent.
+        return editor as any;
+      });
+    } catch (err) {
+      console.warn(`[modes] setEditorComponent failed: ${err}`);
+    }
     // Always start in "default" mode unless --mode flag overrides it.
-
-    // The default mode leaves OMP's system prompt untouched.
     const modeFlag = pi.getFlag("mode");
     let targetIndex: number;
     if (typeof modeFlag === "string" && modeFlag) {
