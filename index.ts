@@ -1,23 +1,36 @@
-import { CustomEditor, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { ExtensionAPI, type ExtensionContext, theme } from "@oh-my-pi/pi-coding-agent";
+import { SEGMENTS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
+import { Key } from "@oh-my-pi/pi-tui";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
 interface ModeDef {
   id: string;
   name: string;
   color: string;
   disabledTools: Set<string>;
   prompt: string;
+  path: string;
+  /** True for the synthetic "default" mode that injects no mode prompt and
+   *  disables no tools.  Synthesized by the extension; not loaded from disk. */
+  isDefault?: boolean;
 }
 
 const PERSIST_KEY = "modes-state";
 
 export default function modesExtension(pi: ExtensionAPI): void {
-  const modesDir = path.join(__dirname, "modes");
+  // Resolve modes directory: check well-known locations first, then fall back
+  // to __dirname/modes (for development). OMP copies index.ts to a temp dir
+  // for compilation, so __dirname/modes won't exist at runtime.
+  const home = process.env.USERPROFILE || process.env.HOME || "";
+  const candidates = [
+    path.join(home, ".omp/agent/modes"),           // user-level (well-known)
+    path.join(process.cwd(), ".omp/modes"),         // project-level
+    path.join(__dirname, "modes"),                  // fallback (dev only)
+  ];
+  const modesDir = candidates.find(d => fs.existsSync(d) && fs.statSync(d).isDirectory()) || candidates[0];
   const availableModes: ModeDef[] = [];
   let currentModeIndex = 0;
   let baselineTools: string[] = []; // Populated by session_start; empty before then.
@@ -125,41 +138,73 @@ export default function modesExtension(pi: ExtensionAPI): void {
         console.warn(`[modes] Duplicate mode id "${id}" (from ${file}). Overwriting previous definition.`);
         availableModes.splice(existing, 1);
       }
-
       availableModes.push({
         id,
         name,
         color,
         disabledTools: new Set(disabledTools),
         prompt,
+        path: path.join(modesDir, file),
       });
     }
+  // ── 1a. Synthesize "default" mode ─────────────────────────────────────────
+  // Always present.  No tools disabled, no prompt injected.  Use this when you
+  // want OMP's original system prompt with no mode-specific instructions.
+  availableModes.unshift({
+    id: "default",
+    name: "Default",
+    color: "muted",
+    disabledTools: new Set(),
+    prompt: "",
+    path: "",
+    isDefault: true,
+  });
+  if (availableModes.length === 1) {
+    console.warn(`[modes] No valid .md files found in ${modesDir}. Only the synthetic "default" mode is available.`);
   }
-
-  if (availableModes.length === 0) {
-    console.warn(`[modes] No valid .md files found in ${modesDir}. Extension disabled.`);
-    return;
-  }
+  // ── 1b. Monkey-patch the statusline "mode" segment ─────────────────────────
+  //
+  // The built-in `mode` segment only shows Plan/Goal/Loop.  We replace its
+  // render with one that falls through to our custom mode when no built-in
+  // mode is active.  The top border refreshes on every agent event, resize,
+  // etc. — `setStatus` is kept as a trigger for requestRender.
+  const originalModeRender = SEGMENTS.mode.render.bind(SEGMENTS.mode);
+  SEGMENTS.mode = {
+    id: "mode",
+    render(ctx: any): any {
+      // Built-in modes take priority (Plan / Goal / Loop).
+      const builtin = originalModeRender(ctx);
+      if (builtin.visible) return builtin;
+      // Show our custom mode.
+      const mode = availableModes[currentModeIndex];
+      if (!mode) return { content: "", visible: false };
+      return { content: theme.fg(mode.color as any, mode.name.toUpperCase()), visible: true };
+    },
+  };
 
   // ── 2. Mode switcher ───────────────────────────────────────────────────────
 
-  function updateModeStatus(ctx: ExtensionContext): void {
-    // Mode label is rendered by the custom editor component.
-    // No separate status update needed — just skip if ctx has no UI.
+  // Cached prompt for the current mode — only re-read from disk on mode switch.
+  let cachedPrompt: string = "";
+  let previousModeId: string = "";
+
+  function loadPrompt(mode: ModeDef): string {
+    try {
+      return fs.readFileSync(mode.path, "utf-8").trim();
+    } catch {
+      return mode.prompt;
+    }
   }
 
   function setMode(ctx: ExtensionContext, index: number): boolean {
     if (index < 0 || index >= availableModes.length) return false;
     if (baselineTools.length === 0) return false;
-
     const mode = availableModes[index];
-
     // Warn about tool names in the mode file that don't match any known tool.
     const unknown = [...mode.disabledTools].filter(t => !allKnownTools.has(t));
     if (unknown.length > 0) {
       console.warn(`[modes] Mode "${mode.id}" references unknown tools: ${unknown.join(", ")}`);
     }
-
     const active = baselineTools.filter(t => !mode.disabledTools.has(t));
     try {
       pi.setActiveTools(active);
@@ -167,10 +212,18 @@ export default function modesExtension(pi: ExtensionAPI): void {
       console.warn(`[modes] setActiveTools failed: ${err}`);
       return false;
     }
-
-    // Update index only after setActiveTools succeeds.
+    // Update index and cache prompt only after setActiveTools succeeds.
+    previousModeId = availableModes[currentModeIndex]?.id || "";
     currentModeIndex = index;
-    updateModeStatus(ctx);
+    cachedPrompt = loadPrompt(mode);
+    // Refresh statusline: setStatus triggers requestRender; the monkey-patched
+    // SEGMENTS.mode.render reads currentModeIndex directly, so the top border
+    // updates on the next updateEditorTopBorder() call (agent event / resize).
+    try {
+      ctx.ui.setStatus("mode", mode.name.toUpperCase());
+    } catch {
+      // setStatus may not be available in all contexts (e.g., RPC/print modes)
+    }
     return true;
   }
 
@@ -182,31 +235,94 @@ export default function modesExtension(pi: ExtensionAPI): void {
     }
   }
 
+  // Inject a mode switch marker into the conversation so the model knows
+  // the context boundary between modes.
+  function notifyModeSwitch(oldModeId: string, newModeId: string): void {
+    // Default mode is the original baseline — no marker injection, no status
+    // chatter.  The model sees the unmodified system prompt.
+    if (newModeId === "default") return;
+    const oldName = oldModeId ? oldModeId.toUpperCase() : "DEFAULT";
+    const newName = newModeId.toUpperCase();
+    const tools = availableModes[currentModeIndex];
+    const disabled = tools.disabledTools.size > 0
+      ? ` Tools disabled: ${[...tools.disabledTools].join(", ")}.`
+      : "";
+    const marker = [
+      `[MODE SWITCH: ${oldName} → ${newName}]`,
+      `You are now in ${newName} mode.${disabled}`,
+      oldModeId
+        ? `Previous responses were under ${oldName} mode rules. From this point forward, follow ${newName} mode rules.`
+        : `Session started in ${newName} mode.`,
+    ].join(" ");
+    try {
+      pi.sendMessage({ customType: "mode-switch", content: marker, display: true });
+    } catch {
+      // sendMessage may not be available in all contexts
+    }
+  }
+
+  function persistAndNotifySwitch(oldModeId: string): void {
+    persistState();
+    notifyModeSwitch(oldModeId, availableModes[currentModeIndex].id);
+  }
+
   // ── 3. /mode command ───────────────────────────────────────────────────────
 
   pi.registerCommand("mode", {
     description: `Switch mode (${availableModes.map(m => m.id).join(" | ")})`,
+    getArgumentCompletions: (prefix: string) => {
+      const all = availableModes.map(m => ({
+        value: m.id,
+        label: m.id,
+        description: m.isDefault
+          ? "unmodified system prompt"
+          : m.disabledTools.size > 0
+            ? `disabled: ${[...m.disabledTools].join(", ")}`
+            : "all tools enabled",
+      }));
+      if (!prefix) return all;
+      return all.filter(item => item.value.startsWith(prefix.toLowerCase()));
+    },
     handler: async (args, ctx) => {
+      // No args → show interactive selector (arrow keys + click)
       if (!args?.trim()) {
-        const current = availableModes[currentModeIndex];
-        const toolInfo = current.disabledTools.size > 0
-          ? ` | Disabled: ${[...current.disabledTools].join(", ")}`
-          : " | All tools enabled";
-        ctx.ui.notify(
-          `Active: ${current.name}${toolInfo}\nAvailable: ${availableModes.map(m => m.id).join(", ")}`,
-          "info"
-        );
+        const options = availableModes.map(m => {
+          const marker = m.id === availableModes[currentModeIndex].id ? " ← active" : "";
+          const tools = m.isDefault
+            ? " [unmodified prompt]"
+            : m.disabledTools.size > 0
+              ? ` [no: ${[...m.disabledTools].join(", ")}]`
+              : " [all tools]";
+          return `${m.name}${tools}${marker}`;
+        });
+        const selected = await ctx.ui.select("Switch Mode", options, {
+          initialIndex: currentModeIndex,
+        });
+        if (selected === undefined) return; // user cancelled
+        const selectedIndex = options.indexOf(selected);
+        if (selectedIndex === -1) return;
+        const oldModeId = availableModes[currentModeIndex].id;
+        if (setMode(ctx, selectedIndex)) {
+          persistAndNotifySwitch(oldModeId);
+          const mode = availableModes[selectedIndex];
+          const toolInfo = mode.disabledTools.size > 0
+            ? ` (${[...mode.disabledTools].join(", ")} disabled)`
+            : "";
+          ctx.ui.notify(`Switched to ${mode.name}${toolInfo}`, "info");
+        } else {
+          ctx.ui.notify("Session not ready yet. Try again in a moment.", "warning");
+        }
         return;
       }
-
+      // Args provided → switch directly
       const index = availableModes.findIndex(m => m.id === args.trim().toLowerCase());
       if (index === -1) {
         ctx.ui.notify(`Unknown mode. Available: ${availableModes.map(m => m.id).join(", ")}`, "error");
         return;
       }
-
+      const oldModeId = availableModes[currentModeIndex].id;
       if (setMode(ctx, index)) {
-        persistState();
+        persistAndNotifySwitch(oldModeId);
         const mode = availableModes[index];
         const toolInfo = mode.disabledTools.size > 0
           ? ` (${[...mode.disabledTools].join(", ")} disabled)`
@@ -224,9 +340,10 @@ export default function modesExtension(pi: ExtensionAPI): void {
   pi.registerShortcut(Key.ctrlShift("l"), {
     description: "Next mode",
     handler: async (ctx) => {
+      const oldModeId = availableModes[currentModeIndex].id;
       const next = (currentModeIndex + 1) % availableModes.length;
       if (setMode(ctx, next)) {
-        persistState();
+        persistAndNotifySwitch(oldModeId);
         ctx.ui.notify(`Mode: ${availableModes[next].name}`, "info");
       } else {
         ctx.ui.notify("Session not ready yet", "warning");
@@ -237,9 +354,10 @@ export default function modesExtension(pi: ExtensionAPI): void {
   pi.registerShortcut(Key.ctrlShift("h"), {
     description: "Previous mode",
     handler: async (ctx) => {
+      const oldModeId = availableModes[currentModeIndex].id;
       const prev = (currentModeIndex - 1 + availableModes.length) % availableModes.length;
       if (setMode(ctx, prev)) {
-        persistState();
+        persistAndNotifySwitch(oldModeId);
         ctx.ui.notify(`Mode: ${availableModes[prev].name}`, "info");
       } else {
         ctx.ui.notify("Session not ready yet", "warning");
@@ -247,10 +365,9 @@ export default function modesExtension(pi: ExtensionAPI): void {
     },
   });
 
-  // ── 5. Inject mode prompt and PLAN.md on every provider request ──────────
+  // ── 5. Inject mode prompt on every provider request ──────────────────────
   // Uses before_provider_request (not before_agent_start) because compaction can
-  // happen mid-agentic-loop. before_agent_start only fires once per user prompt,
-  // so the mode prompt would be lost after mid-turn compaction.
+  // happen mid-agentic-loop. Uses cached prompt — no disk reads on hot path.
 
   function injectIntoPayload(payload: any, text: string): void {
     // Anthropic-style: payload.system is a string or content block array
@@ -277,12 +394,13 @@ export default function modesExtension(pi: ExtensionAPI): void {
   pi.on("before_provider_request", async (event, ctx) => {
     const mode = availableModes[currentModeIndex];
     if (!mode) return;
-
-    // Always inject the mode prompt (compaction-safe)
-    if (mode.prompt) {
-      injectIntoPayload(event.payload, `\n\n[MODE: ${mode.name.toUpperCase()}]\n${mode.prompt}`);
+    // Default mode: leave the system prompt untouched.  This is the only mode
+    // where `cachedPrompt` is empty and we want OMP's original behavior.
+    if (mode.isDefault) return;
+    // Inject cached prompt — no disk I/O on hot path
+    if (cachedPrompt) {
+      injectIntoPayload(event.payload, `\n\n[MODE: ${mode.name.toUpperCase()}]\n${cachedPrompt}`);
     }
-
     // Plan mode: also inject PLAN.md from disk
     if (mode.id === "plan") {
       try {
@@ -303,36 +421,14 @@ export default function modesExtension(pi: ExtensionAPI): void {
     type: "string",
   });
 
-  // ── 7. Inject mode info into the chat box border ──────────────────────────
-
-  pi.on("session_start", (_event, ctx) => {
-    const uiTheme = ctx.ui.theme;
-    ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      class ModeEditor extends CustomEditor {
-        override render(width: number): string[] {
-          const lines = super.render(width);
-          const mode = availableModes[currentModeIndex];
-          if (mode && lines.length > 0) {
-            const label = ` ${mode.name} `;
-            const labelWidth = visibleWidth(label);
-            const dashes = "─".repeat(Math.max(0, width - labelWidth));
-            lines[lines.length - 1] = uiTheme.fg(mode.color, label) + dashes;
-          }
-          return lines;
-        }
-      }
-      return new ModeEditor(tui, theme, keybindings);
-    });
-  });
-
-  // ── 8. Bootstrap ───────────────────────────────────────────────────────────
+  // ── 7. Bootstrap ───────────────────────────────────────────────────────────
   // session_start is the only safe place to capture baseline tools — all extensions
   // have registered by this point, so the tool list is complete.
 
   pi.on("session_start", async (_event, ctx) => {
     try {
       baselineTools = pi.getActiveTools();
-      allKnownTools = new Set(pi.getAllTools().map(t => t.name));
+      allKnownTools = new Set(pi.getAllTools());
     } catch (err) {
       console.warn(`[modes] Failed to initialize tools: ${err}`);
       return;
@@ -361,7 +457,13 @@ export default function modesExtension(pi: ExtensionAPI): void {
 
     const modeFlag = pi.getFlag("mode");
     let targetIndex: number;
-
+    // Helper: prefer "default" mode, fall back to "edit", then first mode.
+    const fallbackIndex = (): number => {
+      const def = availableModes.findIndex(m => m.id === "default");
+      if (def !== -1) return def;
+      const edit = availableModes.findIndex(m => m.id === "edit");
+      return edit !== -1 ? edit : 0;
+    };
     if (typeof modeFlag === "string" && modeFlag) {
       // CLI flag takes priority
       const flagIndex = availableModes.findIndex(m => m.id === modeFlag.toLowerCase());
@@ -369,27 +471,33 @@ export default function modesExtension(pi: ExtensionAPI): void {
         targetIndex = flagIndex;
       } else {
         console.warn(`[modes] Unknown --mode "${modeFlag}". Available: ${availableModes.map(m => m.id).join(", ")}`);
-        const fallback = availableModes.findIndex(m => m.id === "edit");
         const restoredIndex = restoredId ? availableModes.findIndex(m => m.id === restoredId) : -1;
-        targetIndex = restoredIndex !== -1 ? restoredIndex : (fallback !== -1 ? fallback : 0);
+        targetIndex = restoredIndex !== -1 ? restoredIndex : fallbackIndex();
       }
     } else if (restoredId) {
       const restoredIndex = availableModes.findIndex(m => m.id === restoredId);
       if (restoredIndex !== -1) {
         targetIndex = restoredIndex;
       } else {
-        // Mode was removed since last session — fall back to edit/first
+        // Mode was removed since last session — fall back to default
         console.warn(`[modes] Previously active mode "${restoredId}" no longer exists.`);
-        const editIndex = availableModes.findIndex(m => m.id === "edit");
-        targetIndex = editIndex !== -1 ? editIndex : 0;
+        targetIndex = fallbackIndex();
       }
     } else {
-      const editIndex = availableModes.findIndex(m => m.id === "edit");
-      targetIndex = editIndex !== -1 ? editIndex : 0;
+      targetIndex = fallbackIndex();
     }
-
     if (setMode(ctx, targetIndex)) {
-      ctx.ui.notify(`Mode: ${availableModes[targetIndex].name}`, "info");
+      const targetMode = availableModes[targetIndex];
+      // Show a status message for non-default modes (default is the baseline).
+      if (!targetMode.isDefault) {
+        ctx.ui.notify(`Mode: ${targetMode.name}`, "info");
+      }
+      // Inject mode marker on session start so the model knows what mode it's in
+      // (but not for the default mode — that's the original baseline).
+      if (!targetMode.isDefault) {
+        notifyModeSwitch("", targetMode.id);
+      }
     }
-  });
+});
+}
 }

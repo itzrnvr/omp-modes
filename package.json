@@ -1,8 +1,8 @@
 {
-  "name": "pi-modes",
+  "name": "omp-modes",
   "version": "0.1.1",
-  "description": "Switchable agent modes for pi-coding-agent (ask, edit, plan, reviewer)",
-  "author": "R-Dson",
+  "description": "Switchable agent modes for oh-my-pi (ask, edit, plan, review, research)",
+  "author": "R-Dson (adapted for OMP)",
   "license": "MIT",
   "type": "module",
   "publishConfig": {
@@ -17,9 +17,8 @@
   },
   "homepage": "https://github.com/R-Dson/pi-modes",
   "keywords": [
-    "pi",
-    "pi-extension",
-    "pi-package",
+    "omp",
+    "omp-extension",
     "pi-modes",
     "agent-modes"
   ],
@@ -34,10 +33,10 @@
     "package.json"
   ],
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*"
+    "@oh-my-pi/pi-coding-agent": "*",
+    "@oh-my-pi/pi-tui": "*"
   },
-  "pi": {
+  "omp": {
     "extensions": ["./index.ts"]
   }
 }
