@@ -1,5 +1,4 @@
 import { ExtensionAPI, type ExtensionContext, theme } from "@oh-my-pi/pi-coding-agent";
-import { SEGMENTS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { Key } from "@oh-my-pi/pi-tui";
 import * as fs from "fs";
 import * as path from "path";
@@ -162,25 +161,22 @@ export default function modesExtension(pi: ExtensionAPI): void {
   if (availableModes.length === 1) {
     console.warn(`[modes] No valid .md files found in ${modesDir}. Only the synthetic "default" mode is available.`);
   }
-  // ── 1b. Monkey-patch the statusline "mode" segment ─────────────────────────
+  // ── 1b. Mode indicator widget ──────────────────────────────────────────────
   //
-  // The built-in `mode` segment only shows Plan/Goal/Loop.  We replace its
-  // render with one that falls through to our custom mode when no built-in
-  // mode is active.  The top border refreshes on every agent event, resize,
-  // etc. — `setStatus` is kept as a trigger for requestRender.
-  const originalModeRender = SEGMENTS.mode.render.bind(SEGMENTS.mode);
-  SEGMENTS.mode = {
-    id: "mode",
-    render(ctx: any): any {
-      // Built-in modes take priority (Plan / Goal / Loop).
-      const builtin = originalModeRender(ctx);
-      if (builtin.visible) return builtin;
-      // Show our custom mode.
-      const mode = availableModes[currentModeIndex];
-      if (!mode) return { content: "", visible: false };
-      return { content: theme.fg(mode.color as any, mode.name.toUpperCase()), visible: true };
-    },
-  };
+  // Use the public `setWidget` API with `aboveEditor` placement to show the
+  // current mode name as a widget just above the editor.  This is the
+  // official extension surface — no monkey-patching of OMP internals.
+  function refreshModeIndicator(ctx: ExtensionContext): void {
+    const mode = availableModes[currentModeIndex];
+    if (!mode) {
+      try { ctx.ui.setWidget("mode-indicator", undefined); } catch {}
+      return;
+    }
+    const label = theme.fg(mode.color as any, mode.name.toUpperCase());
+    try {
+      ctx.ui.setWidget("mode-indicator", [label], { placement: "aboveEditor" });
+    } catch {}
+  }
 
   // ── 2. Mode switcher ───────────────────────────────────────────────────────
 
@@ -216,8 +212,8 @@ export default function modesExtension(pi: ExtensionAPI): void {
     previousModeId = availableModes[currentModeIndex]?.id || "";
     currentModeIndex = index;
     cachedPrompt = loadPrompt(mode);
-    // Clear any leftover footer status from previous modes.
-    try { ctx.ui.setStatus("mode", undefined); } catch {}
+    // Update the above-editor mode indicator widget.
+    refreshModeIndicator(ctx);
     return true;
   }
 
@@ -433,8 +429,6 @@ export default function modesExtension(pi: ExtensionAPI): void {
       ctx.ui.notify("[modes] No active tools found. Mode restore skipped.", "warning");
       return;
     }
-    // Clear any stale hook status from a previous session (e.g. "Mode: Edit").
-    try { ctx.ui.setStatus("mode", undefined); } catch {}
     // Always start in "default" mode unless --mode flag overrides it.
 
     // The default mode leaves OMP's system prompt untouched.
