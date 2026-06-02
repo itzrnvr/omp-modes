@@ -250,7 +250,7 @@ export default function modesExtension(pi: ExtensionAPI): void {
       `Previous responses were under ${oldName} mode rules. From this point forward, follow ${newName} mode rules.`,
     ].join(" ");
     try {
-      pi.sendMessage({ customType: "mode-switch", content: marker, display: true });
+      pi.sendMessage({ customType: "mode-switch", content: marker, display: false });
     } catch {
       // sendMessage may not be available in all contexts
     }
@@ -433,18 +433,6 @@ export default function modesExtension(pi: ExtensionAPI): void {
       ctx.ui.notify("[modes] No active tools found. Mode restore skipped.", "warning");
       return;
     }
-    // Install the custom editor that shows the mode name in the top border.
-    // This replaces the default editor; all state (text, cursor) is preserved.
-    try {
-      ctx.ui.setEditorComponent((_tui, editorTheme, keybindings) => {
-        const editor = new ModeEditor(editorTheme);
-        // Wire up keybindings so shortcuts (Ctrl+C, Ctrl+P, etc.) still work.
-        // The interactive-mode sets these callbacks after setEditorComponent.
-        return editor as any;
-      });
-    } catch (err) {
-      console.warn(`[modes] setEditorComponent failed: ${err}`);
-    }
     // Always start in "default" mode unless --mode flag overrides it.
     const modeFlag = pi.getFlag("mode");
     let targetIndex: number;
@@ -460,11 +448,23 @@ export default function modesExtension(pi: ExtensionAPI): void {
       targetIndex = availableModes.findIndex(m => m.id === "default");
     }
     if (targetIndex === -1) targetIndex = 0;
+    // setMode BEFORE setEditorComponent so currentModeIndex is correct when
+    // the editor is created — otherwise the top border would briefly show
+    // DEFAULT until the next updateEditorTopBorder() call.
     if (setMode(ctx, targetIndex)) {
       const targetMode = availableModes[targetIndex];
       if (!targetMode.isDefault) {
         notifyModeSwitch("", targetMode.id);
       }
+    }
+    // Install the custom editor that shows the mode name in the top border.
+    try {
+      ctx.ui.setEditorComponent((_tui, editorTheme, _keybindings) => {
+        const editor = new ModeEditor(editorTheme);
+        return editor as any;
+      });
+    } catch (err) {
+      console.warn(`[modes] setEditorComponent failed: ${err}`);
     }
 });
 }
