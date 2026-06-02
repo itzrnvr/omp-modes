@@ -218,6 +218,17 @@ export default function modesExtension(pi: ExtensionAPI): void {
     previousModeId = availableModes[currentModeIndex]?.id || "";
     currentModeIndex = index;
     cachedPrompt = loadPrompt(mode);
+    // Re-install the editor so updateEditorTopBorder() picks up the new mode.
+    // Without this, the top border only refreshes on agent events — the mode
+    // indicator would lag or disappear between mode switches and the next event.
+    try {
+      ctx.ui.setEditorComponent((_tui, editorTheme, _keybindings) => {
+        const editor = new ModeEditor(editorTheme);
+        return editor as any;
+      });
+    } catch (err) {
+      console.warn(`[modes] setEditorComponent failed: ${err}`);
+    }
     return true;
   }
 
