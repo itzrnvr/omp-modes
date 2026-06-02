@@ -463,7 +463,6 @@ export default function modesExtension(pi: ExtensionAPI): void {
     if (setMode(ctx, targetIndex)) {
       const targetMode = availableModes[targetIndex];
       if (!targetMode.isDefault) {
-        ctx.ui.notify(`Mode: ${targetMode.name}`, "info");
         notifyModeSwitch("", targetMode.id);
       }
     }
