@@ -1,7 +1,6 @@
 import { ExtensionAPI, type ExtensionContext, theme } from "@oh-my-pi/pi-coding-agent";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
-import type { EditorTopBorder } from "@oh-my-pi/pi-tui";
-import { Key } from "@oh-my-pi/pi-tui";
+import { Key, truncateToWidth, type EditorTopBorder } from "@oh-my-pi/pi-tui";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
@@ -171,8 +170,6 @@ export default function modesExtension(pi: ExtensionAPI): void {
   // agent event, resize, and mode-status change — so the indicator
   // refreshes automatically.
   class ModeEditor extends CustomEditor {
-    // Store the original (unmodified) top border content so we can re-apply
-    // the mode indicator on every render, even when currentModeIndex changes.
     #storedContent: EditorTopBorder | undefined;
 
     setTopBorder(content: EditorTopBorder | undefined): void {
@@ -180,21 +177,31 @@ export default function modesExtension(pi: ExtensionAPI): void {
       super.setTopBorder(this.#applyMode(content));
     }
 
-    // Override render to re-apply mode indicator on every cycle.  This way
-    // the indicator updates immediately when currentModeIndex changes,
-    // without needing to trigger updateEditorTopBorder() from the extension.
+    // Re-apply mode indicator on every render cycle so the indicator
+    // updates immediately when currentModeIndex changes, without
+    // needing updateEditorTopBorder() from the extension.
     render(width: number): string[] {
       super.setTopBorder(this.#applyMode(this.#storedContent));
       return super.render(width);
     }
 
+    // Truncate statusline content to make room for the mode label,
+    // then append the colored mode name.
     #applyMode(content: EditorTopBorder | undefined): EditorTopBorder | undefined {
       if (!content) return content;
       const mode = availableModes[currentModeIndex];
       if (!mode) return content;
       const label = ` ${mode.name.toUpperCase()} `;
+      const labelVisibleWidth = label.length;
       const colored = theme.fg(mode.color as any, label);
-      return { content: content.content + colored, width: content.width + label.length };
+      // Reserve space for the mode label by truncating the statusline content.
+      const availableForContent = Math.max(0, content.width - labelVisibleWidth);
+      const truncated = truncateToWidth(content.content, availableForContent);
+      const truncatedWidth = availableForContent;
+      return {
+        content: truncated + colored,
+        width: truncatedWidth + labelVisibleWidth,
+      };
     }
   }
 
