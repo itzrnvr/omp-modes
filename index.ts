@@ -170,18 +170,31 @@ export default function modesExtension(pi: ExtensionAPI): void {
   // content.  `updateEditorTopBorder()` calls `setTopBorder()` on every
   // agent event, resize, and mode-status change — so the indicator
   // refreshes automatically.
-  let activeModeEditor: CustomEditor | null = null;
   class ModeEditor extends CustomEditor {
+    // Store the original (unmodified) top border content so we can re-apply
+    // the mode indicator on every render, even when currentModeIndex changes.
+    #storedContent: EditorTopBorder | undefined;
+
     setTopBorder(content: EditorTopBorder | undefined): void {
-      if (content) {
-        const mode = availableModes[currentModeIndex];
-        if (mode) {
-          const label = ` ${mode.name.toUpperCase()} `;
-          const colored = theme.fg(mode.color as any, label);
-          content = { content: content.content + colored, width: content.width + label.length };
-        }
-      }
-      super.setTopBorder(content);
+      this.#storedContent = content;
+      super.setTopBorder(this.#applyMode(content));
+    }
+
+    // Override render to re-apply mode indicator on every cycle.  This way
+    // the indicator updates immediately when currentModeIndex changes,
+    // without needing to trigger updateEditorTopBorder() from the extension.
+    render(width: number): string[] {
+      super.setTopBorder(this.#applyMode(this.#storedContent));
+      return super.render(width);
+    }
+
+    #applyMode(content: EditorTopBorder | undefined): EditorTopBorder | undefined {
+      if (!content) return content;
+      const mode = availableModes[currentModeIndex];
+      if (!mode) return content;
+      const label = ` ${mode.name.toUpperCase()} `;
+      const colored = theme.fg(mode.color as any, label);
+      return { content: content.content + colored, width: content.width + label.length };
     }
   }
 
@@ -197,16 +210,6 @@ export default function modesExtension(pi: ExtensionAPI): void {
     } catch {
       return mode.prompt;
     }
-  }
-
-  // Re-trigger updateEditorTopBorder() by calling setEditorComponent with the
-  // same ModeEditor instance.  This is the only extension API that forces a
-  // top-border refresh without creating a new editor.
-  function refreshModeBorder(ctx: ExtensionContext): void {
-    if (!activeModeEditor) return;
-    try {
-      ctx.ui.setEditorComponent(() => activeModeEditor as any);
-    } catch { /* ignore */ }
   }
 
   function setMode(ctx: ExtensionContext, index: number): boolean {
@@ -229,8 +232,6 @@ export default function modesExtension(pi: ExtensionAPI): void {
     previousModeId = availableModes[currentModeIndex]?.id || "";
     currentModeIndex = index;
     cachedPrompt = loadPrompt(mode);
-    // Force a top-border refresh so the mode indicator updates immediately.
-    refreshModeBorder(ctx);
     return true;
   }
 
@@ -474,8 +475,8 @@ export default function modesExtension(pi: ExtensionAPI): void {
     // Store the instance so we can re-trigger updateEditorTopBorder() later.
     try {
       ctx.ui.setEditorComponent((_tui, editorTheme, _keybindings) => {
-        activeModeEditor = new ModeEditor(editorTheme);
-        return activeModeEditor as any;
+        const editor = new ModeEditor(editorTheme);
+        return editor as any;
       });
     } catch (err) {
       console.warn(`[modes] setEditorComponent failed: ${err}`);
