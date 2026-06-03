@@ -187,7 +187,8 @@ export default function modesExtension(pi: ExtensionAPI): void {
 
     // Insert the mode indicator just before the model name in the top border.
     // The statusline format is: " π  │ ⬢ ModelName ... │ path ... │ context ..."
-    // We insert " PLAN │ " right before ⬢ to make it a separate segment.
+    // We insert " PLAN │ " right before ⬢, then restore the ANSI color state
+    // so the model name and subsequent segments keep their original colors.
     #applyMode(content: EditorTopBorder | undefined): EditorTopBorder | undefined {
       if (!content) return content;
       const mode = availableModes[currentModeIndex];
@@ -195,18 +196,21 @@ export default function modesExtension(pi: ExtensionAPI): void {
       const label = ` ${mode.name.toUpperCase()} `;
       const colored = theme.fg(mode.color as any, label);
       const sep = theme.fg("statusLineSep" as any, "│");
-      const insert = colored + " " + sep + " ";
       // Visible width of the inserted text: label (ASCII) + " │ " = label.length + 3
       const insertWidth = label.length + 3;
       // Find the model icon ⬢ (U+2B22) in the content, skipping ANSI codes.
-      // Insert the mode indicator right before it so it sits between the first
-      // separator and the model name.
       const pos = this.#findVisibleChar(content.content, "\u2B22");
       if (pos === -1) {
         // Fallback: no model icon found — truncate and append at end
         const available = Math.max(0, content.width - label.length);
         return { content: truncateToWidth(content.content, available) + colored, width: content.width };
       }
+      // Capture the active ANSI state at the insertion point and replay it
+      // after our insertion so the model name and following segments keep
+      // their original colors.  theme.fg() ends with \x1b[39m (reset fg)
+      // which would strip color from everything after the insertion.
+      const ansiState = this.#getAnsiStateAt(content.content, pos);
+      const insert = colored + " " + sep + " " + ansiState;
       return {
         content: content.content.slice(0, pos) + insert + content.content.slice(pos),
         width: content.width + insertWidth,
@@ -219,12 +223,11 @@ export default function modesExtension(pi: ExtensionAPI): void {
       let i = 0;
       while (i < str.length) {
         if (str[i] === "\x1b") {
-          // Skip CSI sequence: ESC [ ... m (or any final byte)
           i++;
           if (i < str.length && str[i] === "[") {
             i++;
             while (i < str.length && str[i] !== "m") i++;
-            if (i < str.length) i++; // skip the 'm'
+            if (i < str.length) i++;
           }
           continue;
         }
@@ -232,6 +235,33 @@ export default function modesExtension(pi: ExtensionAPI): void {
         i++;
       }
       return -1;
+    }
+
+    // Scan `str` from the beginning up to `pos` and return the active ANSI
+    // SGR state (background + foreground) that should be replayed to restore
+    // colors after an insertion at `pos`.
+    #getAnsiStateAt(str: string, pos: number): string {
+      let bgCode = "";
+      let fgCode = "";
+      let i = 0;
+      while (i < pos) {
+        if (str[i] === "\x1b" && i + 1 < str.length && str[i + 1] === "[") {
+          let j = i + 2;
+          while (j < str.length && str[j] !== "m") j++;
+          if (j < str.length) {
+            const inner = str.slice(i + 2, j);
+            if (inner === "0") { bgCode = ""; fgCode = ""; }
+            else if (inner === "39") { fgCode = ""; }
+            else if (inner === "49") { bgCode = ""; }
+            else if (/^48[;:]/.test(inner) || /^[4][0-7]$/.test(inner)) { bgCode = str.slice(i, j + 1); }
+            else if (/^38[;:]/.test(inner) || /^[3][0-7]$/.test(inner)) { fgCode = str.slice(i, j + 1); }
+            i = j + 1;
+            continue;
+          }
+        }
+        i++;
+      }
+      return bgCode + fgCode;
     }
   }
 
