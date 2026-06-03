@@ -185,23 +185,53 @@ export default function modesExtension(pi: ExtensionAPI): void {
       return super.render(width);
     }
 
-    // Truncate statusline content to make room for the mode label,
-    // then append the colored mode name.
+    // Insert the mode indicator just before the model name in the top border.
+    // The statusline format is: " π  │ ⬢ ModelName ... │ path ... │ context ..."
+    // We insert " PLAN │ " right before ⬢ to make it a separate segment.
     #applyMode(content: EditorTopBorder | undefined): EditorTopBorder | undefined {
       if (!content) return content;
       const mode = availableModes[currentModeIndex];
       if (!mode) return content;
       const label = ` ${mode.name.toUpperCase()} `;
-      const labelVisibleWidth = label.length;
       const colored = theme.fg(mode.color as any, label);
-      // Reserve space for the mode label by truncating the statusline content.
-      const availableForContent = Math.max(0, content.width - labelVisibleWidth);
-      const truncated = truncateToWidth(content.content, availableForContent);
-      const truncatedWidth = availableForContent;
+      const sep = theme.fg("statusLineSep" as any, "│");
+      const insert = colored + " " + sep + " ";
+      // Visible width of the inserted text: label (ASCII) + " │ " = label.length + 3
+      const insertWidth = label.length + 3;
+      // Find the model icon ⬢ (U+2B22) in the content, skipping ANSI codes.
+      // Insert the mode indicator right before it so it sits between the first
+      // separator and the model name.
+      const pos = this.#findVisibleChar(content.content, "\u2B22");
+      if (pos === -1) {
+        // Fallback: no model icon found — truncate and append at end
+        const available = Math.max(0, content.width - label.length);
+        return { content: truncateToWidth(content.content, available) + colored, width: content.width };
+      }
       return {
-        content: truncated + colored,
-        width: truncatedWidth + labelVisibleWidth,
+        content: content.content.slice(0, pos) + insert + content.content.slice(pos),
+        width: content.width + insertWidth,
       };
+    }
+
+    // Find the first visible occurrence of `ch` in a string that may contain
+    // ANSI escape sequences, returning its byte index.  Returns -1 if not found.
+    #findVisibleChar(str: string, ch: string): number {
+      let i = 0;
+      while (i < str.length) {
+        if (str[i] === "\x1b") {
+          // Skip CSI sequence: ESC [ ... m (or any final byte)
+          i++;
+          if (i < str.length && str[i] === "[") {
+            i++;
+            while (i < str.length && str[i] !== "m") i++;
+            if (i < str.length) i++; // skip the 'm'
+          }
+          continue;
+        }
+        if (str.startsWith(ch, i)) return i;
+        i++;
+      }
+      return -1;
     }
   }
 
